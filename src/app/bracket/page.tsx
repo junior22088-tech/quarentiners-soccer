@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Navbar from '@/components/Navbar'
+import UpdateConfirmModal from '@/components/UpdateConfirmModal'
 import { createClient } from '@/lib/supabase'
 import { formatMatchDate, isMatchPast } from '@/lib/scoring'
 import { PHASE_LABELS, PHASE_MULTIPLIERS, type Match, type Team, type Prediction, type Profile } from '@/types'
@@ -32,6 +33,7 @@ export default function BracketPage() {
   const [saved, setSaved] = useState<Record<number, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [totalPoints, setTotalPoints] = useState(0)
+  const [confirmUpdate, setConfirmUpdate] = useState<{ matchId: number; match: MatchWithTeams } | null>(null)
   const router = useRouter()
   const supabase = createClient()
 
@@ -112,7 +114,7 @@ export default function BracketPage() {
     })
   }
 
-  const savePrediction = async (match: MatchWithTeams) => {
+  const savePrediction = async (match: MatchWithTeams, skipConfirm = false) => {
     const pred = preds[match.id]
     if (!pred) return
 
@@ -128,12 +130,17 @@ export default function BracketPage() {
       return
     }
 
+    // Se já tem palpite salvo e não confirmou ainda → mostra modal
+    if (pred.saved && !skipConfirm) {
+      setConfirmUpdate({ matchId: match.id, match })
+      return
+    }
+
     setSaving(s => ({ ...s, [match.id]: true }))
 
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // Check if already has a saved prediction
     const { data: existing } = await supabase
       .from('predictions')
       .select('id, created_at')
@@ -165,6 +172,7 @@ export default function BracketPage() {
     }
 
     setSaving(s => ({ ...s, [match.id]: false }))
+    setConfirmUpdate(null)
   }
 
   const phaseMatches = matches.filter(m => m.phase === activePhase)
@@ -467,5 +475,12 @@ export default function BracketPage() {
         )}
       </div>
     </div>
-  )
+
+    <UpdateConfirmModal
+      isOpen={confirmUpdate !== null}
+      match={confirmUpdate?.match || null}
+      onConfirm={() => savePrediction(confirmUpdate?.match as MatchWithTeams, true)}
+      onCancel={() => setConfirmUpdate(null)}
+    />
+  
 }
