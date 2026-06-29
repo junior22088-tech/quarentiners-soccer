@@ -1,11 +1,14 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Quarentiners Soccer ⚽',
   description: 'Bolão da Copa do Mundo 2026 — entre amigos, sem dó!',
-  themeColor: '#0d3b1e',
   icons: { icon: '/favicon.svg' },
+}
+
+export const viewport: Viewport = {
+  themeColor: '#0d3b1e',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
