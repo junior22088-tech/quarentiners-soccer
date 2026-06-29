@@ -130,25 +130,26 @@ export default function BracketPage() {
       return
     }
 
-    // Se já tem palpite salvo e não confirmou ainda → mostra modal
-    if (pred.saved && !skipConfirm) {
-      setConfirmUpdate({ matchId: match.id, match })
-      return
-    }
-
-    setSaving(s => ({ ...s, [match.id]: true }))
-
+    // Verifica se é uma atualização (já existe palpite no banco)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
     const { data: existing } = await supabase
       .from('predictions')
-      .select('id, created_at')
+      .select('id')
       .eq('user_id', user.id)
       .eq('match_id', match.id)
       .single()
 
-    const isUpdated = !!existing
+    const isUpdate = !!existing
+
+    // Se é atualização e não confirmou ainda → mostra modal
+    if (isUpdate && !skipConfirm) {
+      setConfirmUpdate({ matchId: match.id, match })
+      return
+    }
+
+    setSaving(s => ({ ...s, [match.id]: true }))
 
     const payload = {
       user_id: user.id,
@@ -157,7 +158,7 @@ export default function BracketPage() {
       predicted_away_score: aScore,
       predicted_winner_id: pred.winnerId,
       predicted_penalties: pred.penalties,
-      is_updated: isUpdated,
+      is_updated: isUpdate,
       updated_at: new Date().toISOString(),
     }
 
@@ -166,7 +167,7 @@ export default function BracketPage() {
     })
 
     if (!error) {
-      setPreds(p => ({ ...p, [match.id]: { ...p[match.id], isUpdated, saved: true } }))
+      setPreds(p => ({ ...p, [match.id]: { ...p[match.id], isUpdated: isUpdate, saved: true } }))
       setSaved(s => ({ ...s, [match.id]: true }))
       setTimeout(() => setSaved(s => ({ ...s, [match.id]: false })), 2000)
     }
