@@ -12,6 +12,7 @@ export default function RegisterPage() {
   const [avatar, setAvatar] = useState('⚽')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [needsConfirm, setNeedsConfirm] = useState(false)
   const supabase = createClient()
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -19,22 +20,23 @@ export default function RegisterPage() {
     setLoading(true)
     setError('')
 
-    if (username.length < 2) {
+    if (username.trim().length < 2) {
       setError('Nome precisa ter pelo menos 2 caracteres')
       setLoading(false)
       return
     }
 
     const { data, error: authError } = await supabase.auth.signUp({
-      email,
+      email: email.trim(),
       password,
-      options: { emailRedirectTo: `${location.origin}/bracket` }
     })
 
     if (authError) {
-      setError(authError.message === 'User already registered'
-        ? 'E-mail já cadastrado 😅'
-        : 'Erro ao criar conta. Tente novamente.')
+      if (authError.message.includes('already registered') || authError.message.includes('already been registered')) {
+        setError('E-mail já cadastrado 😅 Tente fazer login.')
+      } else {
+        setError(`Erro: ${authError.message}`)
+      }
       setLoading(false)
       return
     }
@@ -43,12 +45,41 @@ export default function RegisterPage() {
       // Atualiza perfil com username e avatar
       await supabase
         .from('profiles')
-        .update({ username, avatar_emoji: avatar })
+        .update({ username: username.trim(), avatar_emoji: avatar })
         .eq('id', data.user.id)
 
-      router.push('/onboarding')
+      // Se sessão existe = email confirmation desabilitado → vai direto
+      if (data.session) {
+        router.push('/onboarding')
+      } else {
+        // Email confirmation habilitado → mostra aviso
+        setNeedsConfirm(true)
+      }
     }
+
     setLoading(false)
+  }
+
+  if (needsConfirm) {
+    return (
+      <main className="min-h-screen hero-gradient flex items-center justify-center px-4">
+        <div className="w-full max-w-sm">
+          <div className="bg-white rounded-3xl shadow-2xl p-6 text-center">
+            <div className="text-5xl mb-3">📧</div>
+            <h2 className="text-xl font-bold text-gray-800 mb-2">Confirma seu e-mail!</h2>
+            <p className="text-gray-500 text-sm mb-4">
+              Mandamos um link pra <strong>{email}</strong>. Clica lá e depois volta aqui pra entrar!
+            </p>
+            <button
+              onClick={() => router.push('/login')}
+              className="w-full bg-green-600 text-white font-bold py-3 rounded-xl"
+            >
+              Ir pro login
+            </button>
+          </div>
+        </div>
+      </main>
+    )
   }
 
   return (
@@ -64,7 +95,6 @@ export default function RegisterPage() {
           <h2 className="text-xl font-bold text-gray-800 mb-5">Criar conta</h2>
 
           <form onSubmit={handleRegister} className="space-y-4">
-            {/* Avatar */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Seu emoji de jogador
@@ -126,7 +156,7 @@ export default function RegisterPage() {
             </div>
 
             {error && (
-              <div className="bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm">
+              <div className="bg-red-50 text-red-600 rounded-xl px-4 py-3 text-sm break-words">
                 😬 {error}
               </div>
             )}
