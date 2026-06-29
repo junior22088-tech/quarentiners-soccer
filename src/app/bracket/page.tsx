@@ -13,27 +13,26 @@ type MatchWithTeams = Match & {
   winner: Team | null
 }
 
-type PredictionMap = Record<number, {
+type PredEntry = {
   homeScore: string
   awayScore: string
   winnerId: number | null
   penalties: boolean
-  isUpdated: boolean
-  saved: boolean
-}>
+  savedInDB: boolean   // veio do banco — não muda ao editar
+  isUpdated: boolean   // is_updated do banco
+}
 
 const PHASES = ['16avos', 'oitavas', 'quartas', 'semi', 'final'] as const
 
 export default function BracketPage() {
-  const [profile, setProfile] = useState<Profile | null>(null)
   const [matches, setMatches] = useState<MatchWithTeams[]>([])
-  const [preds, setPreds] = useState<PredictionMap>({})
+  const [preds, setPreds] = useState<Record<number, PredEntry>>({})
   const [activePhase, setActivePhase] = useState<string>('16avos')
   const [saving, setSaving] = useState<Record<number, boolean>>({})
-  const [saved, setSaved] = useState<Record<number, boolean>>({})
+  const [justSaved, setJustSaved] = useState<Record<number, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [totalPoints, setTotalPoints] = useState(0)
-  const [confirmUpdate, setConfirmUpdate] = useState<{ matchId: number; match: MatchWithTeams } | null>(null)
+  const [confirmMatch, setConfirmMatch] = useState<MatchWithTeams | null>(null)
   const router = useRouter()
   const supabase = createClient()
 
@@ -50,30 +49,26 @@ export default function BracketPage() {
       supabase.from('predictions').select('*').eq('user_id', user.id)
     ])
 
-    setProfile(prof)
     setMatches((mts as MatchWithTeams[]) || [])
 
-    // Total points
-    const pts = (prs || []).reduce((s: number, p: Prediction) => s + (p.points_earned || 0), 0)
+    const pts = ((prs as Prediction[]) || []).reduce((s, p) => s + (p.points_earned || 0), 0)
     setTotalPoints(pts)
 
-    // Build prediction map
-    const map: PredictionMap = {}
+    const map: Record<number, PredEntry> = {}
+
+    // Preenche com palpites existentes do banco
     for (const p of (prs as Prediction[]) || []) {
-      const m = (mts as MatchWithTeams[])?.find(x => x.id === p.match_id)
-      const hasExisting = !!map[p.match_id]
-      if (!hasExisting) {
-        map[p.match_id] = {
-          homeScore: p.predicted_home_score?.toString() ?? '',
-          awayScore: p.predicted_away_score?.toString() ?? '',
-          winnerId: p.predicted_winner_id,
-          penalties: p.predicted_penalties ?? false,
-          isUpdated: p.is_updated ?? false,
-          saved: true,
-        }
+      map[p.match_id] = {
+        homeScore: p.predicted_home_score?.toString() ?? '',
+        awayScore: p.predicted_away_score?.toString() ?? '',
+        winnerId: p.predicted_winner_id,
+        penalties: p.predicted_penalties ?? false,
+        savedInDB: true,
+        isUpdated: p.is_updated ?? false,
       }
     }
-    // Init empty preds for unpredicted matches
+
+    // Inicializa vazios para jogos sem palpite
     for (const m of (mts as MatchWithTeams[]) || []) {
       if (!map[m.id]) {
         map[m.id] = {
@@ -81,11 +76,12 @@ export default function BracketPage() {
           awayScore: '',
           winnerId: null,
           penalties: false,
+          savedInDB: false,
           isUpdated: false,
-          saved: false,
         }
       }
     }
+
     setPreds(map)
     setLoading(false)
   }, [])
@@ -93,78 +89,74 @@ export default function BracketPage() {
   useEffect(() => { loadData() }, [loadData])
 
   const updatePred = (matchId: number, field: string, value: unknown) => {
-    setPreds(p => {
-      const prev = p[matchId]
-      const updated: PredictionMap[number] = { ...prev, [field]: value, saved: false }
+    setPreds(prev => {
+      const entry = prev[matchId]
+      const updated = { ...entry, [field]: value }
 
-      // If changing scores, auto-set winner based on score
       if (field === 'homeScore' || field === 'awayScore') {
-        const hs = field === 'homeScore' ? String(value) : prev.homeScore
-        const as_ = field === 'awayScore' ? String(value) : prev.awayScore
+        const hs = field === 'homeScore' ? String(value) : entry.homeScore
+        const as_ = field === 'awayScore' ? String(value) : entry.awayScore
         const hNum = parseInt(hs)
         const aNum = parseInt(as_)
         if (!isNaN(hNum) && !isNaN(aNum)) {
           const m = matches.find(x => x.id === matchId)
           if (hNum > aNum) updated.winnerId = m?.home_team_id ?? null
           else if (aNum > hNum) updated.winnerId = m?.away_team_id ?? null
-          // Equal: keep current winner (user sets manually or penalty winner)
         }
       }
-      return { ...p, [matchId]: updated }
+      return { ...prev, [matchId]: updated }
     })
   }
 
-  const savePrediction = async (match: MatchWithTeams, skipConfirm = false) => {
+  const doSave = async (match: MatchWithTeams) => {
     const pred = preds[match.id]
     if (!pred) return
 
     const hScore = parseInt(pred.homeScore)
     const aScore = parseInt(pred.awayScore)
 
-    if (isNaN(hScore) || isNaN(aScore)) {
-      alert('Preencha o placar completo antes de salvar! ⚽')
-      return
-    }
-    if (!pred.winnerId) {
-      alert('Escolha quem vai passar (clique no nome do time)! 🏆')
-      return
-    }
+    if (isNaN(hScore) || isNaN(aScore)) { alert('Preencha o placar! ⚽'); return }
+    if (!pred.winnerId) { alert('Escolha quem vai passar! 🏆'); return }
 
-    // Mostra modal se é uma atualização (pred.isUpdated = teve palpite anterior)
-    if (pred.isUpdated && !skipConfirm) {
-      setConfirmUpdate({ matchId: match.id, match })
-      return
-    }
-
-    // Se chegou aqui, salva normalmente
     setSaving(s => ({ ...s, [match.id]: true }))
+    setConfirmMatch(null)
 
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const payload = {
+    const { error } = await supabase.from('predictions').upsert({
       user_id: user.id,
       match_id: match.id,
       predicted_home_score: hScore,
       predicted_away_score: aScore,
       predicted_winner_id: pred.winnerId,
       predicted_penalties: pred.penalties,
-      is_updated: true,
+      is_updated: pred.savedInDB, // true se já existia antes
       updated_at: new Date().toISOString(),
-    }
-
-    const { error } = await supabase.from('predictions').upsert(payload, {
-      onConflict: 'user_id,match_id'
-    })
+    }, { onConflict: 'user_id,match_id' })
 
     if (!error) {
-      setPreds(p => ({ ...p, [match.id]: { ...p[match.id], isUpdated: true, saved: true } }))
-      setSaved(s => ({ ...s, [match.id]: true }))
-      setTimeout(() => setSaved(s => ({ ...s, [match.id]: false })), 2000)
+      setPreds(p => ({
+        ...p,
+        [match.id]: { ...p[match.id], savedInDB: true, isUpdated: pred.savedInDB }
+      }))
+      setJustSaved(s => ({ ...s, [match.id]: true }))
+      setTimeout(() => setJustSaved(s => ({ ...s, [match.id]: false })), 2500)
     }
 
     setSaving(s => ({ ...s, [match.id]: false }))
-    setConfirmUpdate(null)
+  }
+
+  const handleSaveClick = (match: MatchWithTeams) => {
+    const pred = preds[match.id]
+    if (!pred) return
+
+    // Se já tem palpite no banco → pede confirmação
+    if (pred.savedInDB) {
+      setConfirmMatch(match)
+    } else {
+      doSave(match)
+    }
   }
 
   const phaseMatches = matches.filter(m => m.phase === activePhase)
@@ -182,13 +174,13 @@ export default function BracketPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-24 md:pb-8">
-      <Navbar />
+    <>
+      <div className="min-h-screen bg-gray-50 pb-24 md:pb-8">
+        <Navbar />
 
-      {/* Header */}
-      <div className="bg-gradient-to-r from-green-800 to-green-700 text-white px-4 py-5">
-        <div className="max-w-2xl mx-auto">
-          <div className="flex items-center justify-between">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-green-800 to-green-700 text-white px-4 py-5">
+          <div className="max-w-2xl mx-auto flex items-center justify-between">
             <div>
               <p className="text-green-300 text-xs font-medium uppercase tracking-wide">Copa do Mundo 2026</p>
               <h1 className="text-xl font-bold mt-0.5">Meus Palpites</h1>
@@ -199,15 +191,11 @@ export default function BracketPage() {
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Phase tabs */}
-      <div className="max-w-2xl mx-auto px-4">
-        <div className="flex gap-2 mt-4 overflow-x-auto pb-1 no-scrollbar">
-          {PHASES.map(phase => {
-            const phaseMs = matches.filter(m => m.phase === phase)
-            const locked = phaseMs.length > 0 && phaseMs.every(m => m.is_locked || m.home_team_id === null)
-            return (
+        {/* Phase tabs */}
+        <div className="max-w-2xl mx-auto px-4">
+          <div className="flex gap-2 mt-4 overflow-x-auto pb-1">
+            {PHASES.map(phase => (
               <button
                 key={phase}
                 onClick={() => setActivePhase(phase)}
@@ -217,262 +205,220 @@ export default function BracketPage() {
                     : 'bg-white text-gray-600 border border-gray-200 hover:border-green-300'
                 }`}
               >
-                {phase === '16avos' ? '16avos' :
-                 phase === 'oitavas' ? 'Oitavas' :
-                 phase === 'quartas' ? 'Quartas' :
-                 phase === 'semi' ? 'Semifinais' : '🏆 Final'}
-                {locked && phase !== '16avos' && <span className="ml-1 opacity-60">🔒</span>}
+                {phase === 'final' ? '🏆 Final' : phase === 'semi' ? 'Semifinais' : phase === 'quartas' ? 'Quartas' : phase === 'oitavas' ? 'Oitavas' : '16avos'}
               </button>
-            )
-          })}
-        </div>
-
-        {/* Multiplier banner */}
-        <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2 flex items-center gap-2">
-          <span className="text-amber-600 text-lg">⚡</span>
-          <span className="text-xs text-amber-700">
-            <strong>Multiplicador {PHASE_LABELS[activePhase]}:</strong> ×{currentPhaseMultiplier}
-            {currentPhaseMultiplier > 1 && ` — cada ponto vale mais!`}
-          </span>
-        </div>
-
-        {/* Match list */}
-        <div className="mt-4 space-y-3">
-          {phaseMatches.length === 0 && (
-            <div className="text-center py-12 text-gray-400">
-              <div className="text-4xl mb-2">⏳</div>
-              <p>Os confrontos desta fase ainda não foram definidos.</p>
-              <p className="text-sm mt-1">Aguarde os jogos anteriores terminarem!</p>
-            </div>
-          )}
-
-          {phaseMatches.map(match => {
-            const pred = preds[match.id] || { homeScore: '', awayScore: '', winnerId: null, penalties: false, isUpdated: false, saved: false }
-            const isLocked = match.is_locked || isMatchPast(match.scheduled_at)
-            const isFinished = match.is_finished
-            const noTeams = !match.home_team || !match.away_team
-            const isSaving = saving[match.id]
-            const justSaved = saved[match.id]
-            const hasHomePred = pred.homeScore !== ''
-            const hasAwayPred = pred.awayScore !== ''
-            const hasPred = pred.saved
-
-            return (
-              <div
-                key={match.id}
-                className={`bg-white rounded-2xl shadow-sm border match-card overflow-hidden ${
-                  isFinished ? 'border-gray-100' : isLocked ? 'border-orange-100' : 'border-gray-100'
-                }`}
-              >
-                {/* Match header */}
-                <div className={`px-4 py-2 flex items-center justify-between ${
-                  isFinished ? 'bg-gray-50' : isLocked ? 'bg-orange-50' : 'bg-green-50'
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-gray-500">{match.match_label}</span>
-                    {match.location && (
-                      <span className="text-xs text-gray-400">· {match.location}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {isFinished ? (
-                      <span className="text-xs bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 font-medium">
-                        🔒 Encerrado
-                      </span>
-                    ) : isLocked ? (
-                      <span className="text-xs bg-orange-100 text-orange-600 rounded-full px-2 py-0.5 font-medium flex items-center gap-1">
-                        <span className="live-dot inline-block w-1.5 h-1.5 bg-orange-500 rounded-full"></span>
-                        Em andamento
-                      </span>
-                    ) : (
-                      <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5 font-medium">
-                        ✏️ Aberto
-                      </span>
-                    )}
-                    <span className="text-xs text-gray-400">
-                      {formatMatchDate(match.scheduled_at)}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Match content */}
-                <div className="p-4">
-                  {noTeams ? (
-                    <div className="text-center py-4 text-gray-400">
-                      <span className="text-2xl">🔮</span>
-                      <p className="text-sm mt-1">A ser definido...</p>
-                    </div>
-                  ) : (
-                    <>
-                      {/* Teams vs scores */}
-                      <div className="flex items-center gap-3">
-                        {/* Home team */}
-                        <button
-                          onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.home_team_id)}
-                          disabled={isLocked || isFinished}
-                          className={`flex-1 text-center transition-all rounded-xl p-2 ${
-                            pred.winnerId === match.home_team_id && !isFinished
-                              ? 'bg-green-50 ring-2 ring-green-500'
-                              : isFinished && match.winner_id === match.home_team_id
-                              ? 'bg-green-50 ring-2 ring-green-500'
-                              : 'hover:bg-gray-50'
-                          } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
-                        >
-                          <div className="text-2xl">{match.home_team?.flag}</div>
-                          <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.home_team?.name}</div>
-                          {isFinished && match.winner_id === match.home_team_id && (
-                            <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
-                          )}
-                        </button>
-
-                        {/* Scores */}
-                        <div className="flex items-center gap-2">
-                          {isFinished ? (
-                            <div className="flex items-center gap-2">
-                              <div className="text-2xl font-extrabold text-gray-800">{match.home_score}</div>
-                              <div className="text-gray-300 font-light text-lg">×</div>
-                              <div className="text-2xl font-extrabold text-gray-800">{match.away_score}</div>
-                            </div>
-                          ) : isLocked ? (
-                            <div className="flex items-center gap-1 text-gray-400">
-                              <input value={pred.homeScore} readOnly className="score-input bg-gray-50 text-gray-400" />
-                              <span className="text-gray-300 text-sm">×</span>
-                              <input value={pred.awayScore} readOnly className="score-input bg-gray-50 text-gray-400" />
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1">
-                              <input
-                                type="number"
-                                min="0"
-                                max="20"
-                                value={pred.homeScore}
-                                onChange={e => updatePred(match.id, 'homeScore', e.target.value)}
-                                className="score-input"
-                                placeholder="0"
-                              />
-                              <span className="text-gray-300 text-sm">×</span>
-                              <input
-                                type="number"
-                                min="0"
-                                max="20"
-                                value={pred.awayScore}
-                                onChange={e => updatePred(match.id, 'awayScore', e.target.value)}
-                                className="score-input"
-                                placeholder="0"
-                              />
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Away team */}
-                        <button
-                          onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.away_team_id)}
-                          disabled={isLocked || isFinished}
-                          className={`flex-1 text-center transition-all rounded-xl p-2 ${
-                            pred.winnerId === match.away_team_id && !isFinished
-                              ? 'bg-green-50 ring-2 ring-green-500'
-                              : isFinished && match.winner_id === match.away_team_id
-                              ? 'bg-green-50 ring-2 ring-green-500'
-                              : 'hover:bg-gray-50'
-                          } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
-                        >
-                          <div className="text-2xl">{match.away_team?.flag}</div>
-                          <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.away_team?.name}</div>
-                          {isFinished && match.winner_id === match.away_team_id && (
-                            <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Penalties toggle (if not finished) */}
-                      {!isFinished && !isLocked && (
-                        <div className="mt-3 flex items-center justify-center gap-2">
-                          <button
-                            onClick={() => updatePred(match.id, 'penalties', !pred.penalties)}
-                            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-all ${
-                              pred.penalties
-                                ? 'bg-yellow-50 border-yellow-300 text-yellow-700 font-semibold'
-                                : 'border-gray-200 text-gray-500 hover:border-yellow-300'
-                            }`}
-                          >
-                            🟡 {pred.penalties ? 'Vai a pênaltis! (+2)' : 'Vai a pênaltis?'}
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Finished: result details */}
-                      {isFinished && match.went_to_penalties && (
-                        <div className="mt-2 text-center text-xs text-yellow-600 bg-yellow-50 rounded-lg py-1.5">
-                          🟡 Foi a pênaltis! {match.winner?.name} avançou
-                        </div>
-                      )}
-
-                      {/* User's prediction result (if finished) */}
-                      {isFinished && pred.saved && (
-                        <div className={`mt-3 rounded-xl p-2.5 text-xs ${
-                          (pred as PredictionMap[number] & { points_earned?: number }).points_earned ?? pred.homeScore
-                            ? 'bg-green-50 border border-green-100'
-                            : 'bg-red-50 border border-red-100'
-                        }`}>
-                          <div className="flex items-center justify-between">
-                            <span className="text-gray-600">
-                              Seu palpite: <strong>{pred.homeScore}×{pred.awayScore}</strong>
-                              {pred.isUpdated && <span className="text-orange-500 ml-1">(atualizado)</span>}
-                            </span>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Save button */}
-                      {!isFinished && !isLocked && (
-                        <div className="mt-3">
-                          {pred.isUpdated && pred.saved && (
-                            <div className="text-center text-xs text-orange-500 mb-1.5">
-                              🔄 Atualizado — vale pontos reduzidos
-                            </div>
-                          )}
-                          <button
-                            onClick={() => savePrediction(match)}
-                            disabled={isSaving || justSaved}
-                            className={`w-full font-semibold py-2.5 rounded-xl text-sm transition-all active:scale-95 ${
-                              justSaved
-                                ? 'bg-green-100 text-green-700'
-                                : pred.isUpdated && hasPred
-                                ? 'bg-orange-500 hover:bg-orange-600 text-white'
-                                : 'bg-green-600 hover:bg-green-700 text-white'
-                            }`}
-                          >
-                            {justSaved ? '✅ Salvo!' : isSaving ? '⏳...' : pred.saved ? '🔄 Atualizar palpite' : '💾 Salvar palpite'}
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-
-        {/* Points summary */}
-        {activePhase === '16avos' && (
-          <div className="mt-6 bg-white rounded-2xl border border-gray-100 p-4 text-center">
-            <p className="text-xs text-gray-500 mb-1">Palpites salvos</p>
-            <p className="text-2xl font-bold text-green-600">
-              {Object.values(preds).filter(p => p.saved && matches.find(m => m.phase === '16avos' && preds[m.id] === p)).length}
-              <span className="text-gray-400 text-lg font-normal">/{phaseMatches.length}</span>
-            </p>
-            <p className="text-xs text-gray-400 mt-1">jogos dos 16avos previstos</p>
+            ))}
           </div>
-        )}
-      </div>
-    </div>
 
-    <UpdateConfirmModal
-      isOpen={confirmUpdate !== null}
-      match={confirmUpdate?.match || null}
-      onConfirm={() => savePrediction(confirmUpdate?.match as MatchWithTeams, true)}
-      onCancel={() => setConfirmUpdate(null)}
-    />
-  
+          {/* Multiplier banner */}
+          <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2 flex items-center gap-2">
+            <span className="text-amber-600 text-lg">⚡</span>
+            <span className="text-xs text-amber-700">
+              <strong>{PHASE_LABELS[activePhase]}:</strong> ×{currentPhaseMultiplier}
+              {currentPhaseMultiplier > 1 && ' — cada ponto vale mais!'}
+            </span>
+          </div>
+
+          {/* Match list */}
+          <div className="mt-4 space-y-3">
+            {phaseMatches.length === 0 && (
+              <div className="text-center py-12 text-gray-400">
+                <div className="text-4xl mb-2">⏳</div>
+                <p>Confrontos ainda não definidos.</p>
+              </div>
+            )}
+
+            {phaseMatches.map(match => {
+              const pred = preds[match.id]
+              const isLocked = match.is_locked || isMatchPast(match.scheduled_at)
+              const isFinished = match.is_finished
+              const noTeams = !match.home_team || !match.away_team
+              const isSaving = saving[match.id]
+              const isSaved = justSaved[match.id]
+              const hasPredInDB = pred?.savedInDB ?? false
+
+              return (
+                <div
+                  key={match.id}
+                  className={`bg-white rounded-2xl shadow-sm border match-card overflow-hidden ${
+                    isFinished ? 'border-gray-100' : isLocked ? 'border-orange-100' : 'border-gray-100'
+                  }`}
+                >
+                  {/* Match header */}
+                  <div className={`px-4 py-2 flex items-center justify-between ${
+                    isFinished ? 'bg-gray-50' : isLocked ? 'bg-orange-50' : 'bg-green-50'
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-gray-500">{match.match_label}</span>
+                      {match.location && <span className="text-xs text-gray-400">· {match.location}</span>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isFinished ? (
+                        <span className="text-xs bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 font-medium">🔒 Encerrado</span>
+                      ) : isLocked ? (
+                        <span className="text-xs bg-orange-100 text-orange-600 rounded-full px-2 py-0.5 font-medium">⏳ Aguardando resultado</span>
+                      ) : (
+                        <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5 font-medium">✏️ Aberto</span>
+                      )}
+                      <span className="text-xs text-gray-400">{formatMatchDate(match.scheduled_at)}</span>
+                    </div>
+                  </div>
+
+                  {/* Content */}
+                  <div className="p-4">
+                    {noTeams ? (
+                      <div className="text-center py-4 text-gray-400">
+                        <span className="text-2xl">🔮</span>
+                        <p className="text-sm mt-1">A ser definido...</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-3">
+                          {/* Home team */}
+                          <button
+                            onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.home_team_id)}
+                            disabled={isLocked || isFinished}
+                            className={`flex-1 text-center rounded-xl p-2 transition-all ${
+                              pred?.winnerId === match.home_team_id
+                                ? 'bg-green-50 ring-2 ring-green-500'
+                                : isFinished && match.winner_id === match.home_team_id
+                                ? 'bg-green-50 ring-2 ring-green-500'
+                                : 'hover:bg-gray-50'
+                            } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
+                          >
+                            <div className="text-2xl">{match.home_team?.flag}</div>
+                            <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.home_team?.name}</div>
+                            {isFinished && match.winner_id === match.home_team_id && (
+                              <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
+                            )}
+                          </button>
+
+                          {/* Scores */}
+                          <div className="flex items-center gap-2">
+                            {isFinished ? (
+                              <div className="flex items-center gap-2">
+                                <div className="text-2xl font-extrabold text-gray-800">{match.home_score}</div>
+                                <div className="text-gray-300 font-light text-lg">×</div>
+                                <div className="text-2xl font-extrabold text-gray-800">{match.away_score}</div>
+                              </div>
+                            ) : isLocked ? (
+                              <div className="flex items-center gap-1">
+                                <div className="score-input bg-gray-50 text-gray-400 flex items-center justify-center text-xl font-bold rounded-xl border-2 border-gray-200">
+                                  {pred?.homeScore || '?'}
+                                </div>
+                                <span className="text-gray-300 text-sm">×</span>
+                                <div className="score-input bg-gray-50 text-gray-400 flex items-center justify-center text-xl font-bold rounded-xl border-2 border-gray-200">
+                                  {pred?.awayScore || '?'}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="20"
+                                  value={pred?.homeScore ?? ''}
+                                  onChange={e => updatePred(match.id, 'homeScore', e.target.value)}
+                                  className="score-input"
+                                  placeholder="0"
+                                />
+                                <span className="text-gray-300 text-sm">×</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="20"
+                                  value={pred?.awayScore ?? ''}
+                                  onChange={e => updatePred(match.id, 'awayScore', e.target.value)}
+                                  className="score-input"
+                                  placeholder="0"
+                                />
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Away team */}
+                          <button
+                            onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.away_team_id)}
+                            disabled={isLocked || isFinished}
+                            className={`flex-1 text-center rounded-xl p-2 transition-all ${
+                              pred?.winnerId === match.away_team_id
+                                ? 'bg-green-50 ring-2 ring-green-500'
+                                : isFinished && match.winner_id === match.away_team_id
+                                ? 'bg-green-50 ring-2 ring-green-500'
+                                : 'hover:bg-gray-50'
+                            } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
+                          >
+                            <div className="text-2xl">{match.away_team?.flag}</div>
+                            <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.away_team?.name}</div>
+                            {isFinished && match.winner_id === match.away_team_id && (
+                              <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Penalties toggle */}
+                        {!isFinished && !isLocked && (
+                          <div className="mt-3 flex justify-center">
+                            <button
+                              onClick={() => updatePred(match.id, 'penalties', !pred?.penalties)}
+                              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-all ${
+                                pred?.penalties
+                                  ? 'bg-yellow-50 border-yellow-300 text-yellow-700 font-semibold'
+                                  : 'border-gray-200 text-gray-500 hover:border-yellow-300'
+                              }`}
+                            >
+                              🟡 {pred?.penalties ? 'Vai a pênaltis! (+2)' : 'Vai a pênaltis?'}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Penalties result */}
+                        {isFinished && match.went_to_penalties && (
+                          <div className="mt-2 text-center text-xs text-yellow-600 bg-yellow-50 rounded-lg py-1.5">
+                            🟡 Foi a pênaltis! {match.winner?.name} avançou
+                          </div>
+                        )}
+
+                        {/* Save button */}
+                        {!isFinished && !isLocked && (
+                          <div className="mt-3">
+                            {hasPredInDB && (
+                              <p className="text-center text-xs text-orange-500 mb-1.5">
+                                🔄 Você já tem um palpite salvo para este jogo
+                              </p>
+                            )}
+                            <button
+                              onClick={() => handleSaveClick(match)}
+                              disabled={isSaving || isSaved}
+                              className={`w-full font-semibold py-2.5 rounded-xl text-sm transition-all active:scale-95 ${
+                                isSaved
+                                  ? 'bg-green-100 text-green-700'
+                                  : hasPredInDB
+                                  ? 'bg-orange-500 hover:bg-orange-600 text-white'
+                                  : 'bg-green-600 hover:bg-green-700 text-white'
+                              }`}
+                            >
+                              {isSaved ? '✅ Salvo!' : isSaving ? '⏳...' : hasPredInDB ? '🔄 Atualizar palpite' : '💾 Salvar palpite'}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Modal de confirmação — DENTRO do return, fora das divs de conteúdo */}
+      <UpdateConfirmModal
+        isOpen={confirmMatch !== null}
+        match={confirmMatch}
+        onConfirm={() => confirmMatch && doSave(confirmMatch)}
+        onCancel={() => setConfirmMatch(null)}
+      />
+    </>
+  )
 }
