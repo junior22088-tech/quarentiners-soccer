@@ -1,40 +1,27 @@
-import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request })
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() { return request.cookies.getAll() },
-        setAll(cookiesToSet: { name: string; value: string; options?: Record<string, unknown> }[]) {
-          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
-          supabaseResponse = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options as Parameters<typeof supabaseResponse.cookies.set>[2]))
-        },
-      },
-    }
-  )
-
-  const { data: { user } } = await supabase.auth.getUser()
   const path = request.nextUrl.pathname
-
   const publicPaths = ['/', '/login', '/register']
   const isPublic = publicPaths.some(p => path === p)
 
-  if (!user && !isPublic) {
+  // Verifica cookie de sessão do Supabase sem usar o cliente completo
+  // (evita conflito com Edge Runtime)
+  const projectRef = 'ldgvscnyiltteoevpqag'
+  const hasSession =
+    request.cookies.has(`sb-${projectRef}-auth-token`) ||
+    request.cookies.has(`sb-${projectRef}-auth-token.0`) ||
+    request.cookies.has(`sb-${projectRef}-auth-token.1`)
+
+  if (!hasSession && !isPublic) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  if (user && (path === '/login' || path === '/register')) {
+  if (hasSession && (path === '/login' || path === '/register')) {
     return NextResponse.redirect(new URL('/bracket', request.url))
   }
 
-  return supabaseResponse
+  return NextResponse.next()
 }
 
 export const config = {
