@@ -39,10 +39,20 @@ body {
 /* Card hover effect */
 .match-card {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
+  position: relative;
 }
 .match-card:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+}
+
+/* Garante que inputs estão sempre acessíveis */
+.match-card input,
+.match-card select,
+.match-card button {
+  position: relative;
+  z-index: 10;
+  pointer-events: auto;
 }
 
 /* Score input */
@@ -56,6 +66,9 @@ body {
   border: 2px solid #e2e8f0;
   outline: none;
   transition: border-color 0.15s;
+  pointer-events: auto !important;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .score-input:focus {
   border-color: #22c55e;
