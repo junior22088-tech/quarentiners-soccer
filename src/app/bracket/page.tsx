@@ -100,8 +100,9 @@ export default function BracketPage() {
         const aNum = parseInt(as_)
         if (!isNaN(hNum) && !isNaN(aNum)) {
           const m = matches.find(x => x.id === matchId)
-          if (hNum > aNum) updated.winnerId = m?.home_team_id ?? null
-          else if (aNum > hNum) updated.winnerId = m?.away_team_id ?? null
+          if (hNum > aNum)      updated.winnerId = m?.home_team_id ?? null  // auto: casa
+          else if (aNum > hNum) updated.winnerId = m?.away_team_id ?? null  // auto: fora
+          else                  updated.winnerId = null  // empate: usuário escolhe manualmente
         }
       }
       return { ...prev, [matchId]: updated }
@@ -236,6 +237,9 @@ export default function BracketPage() {
               const isSaving = saving[match.id]
               const isSaved = justSaved[match.id]
               const hasPredInDB = pred?.savedInDB ?? false
+              const hNum = parseInt(pred?.homeScore ?? '')
+              const aNum = parseInt(pred?.awayScore ?? '')
+              const isTie = !isNaN(hNum) && !isNaN(aNum) && hNum === aNum
 
               return (
                 <div
@@ -274,24 +278,20 @@ export default function BracketPage() {
                     ) : (
                       <>
                         <div className="flex items-center gap-3">
-                          {/* Home team */}
-                          <button
-                            onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.home_team_id)}
-                            disabled={isLocked || isFinished}
-                            className={`flex-1 text-center rounded-xl p-2 transition-all ${
-                              pred?.winnerId === match.home_team_id
-                                ? 'bg-green-50 ring-2 ring-green-500'
-                                : isFinished && match.winner_id === match.home_team_id
-                                ? 'bg-green-50 ring-2 ring-green-500'
-                                : 'hover:bg-gray-50'
-                            } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
-                          >
+                          {/* Home team — só visual, não clicável */}
+                          <div className={`flex-1 text-center rounded-xl p-2 ${
+                            isFinished && match.winner_id === match.home_team_id
+                              ? 'bg-green-50 ring-2 ring-green-500'
+                              : !isFinished && pred?.winnerId === match.home_team_id
+                              ? 'bg-green-50 ring-2 ring-green-400'
+                              : ''
+                          }`}>
                             <div className="text-2xl">{match.home_team?.flag}</div>
                             <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.home_team?.name}</div>
                             {isFinished && match.winner_id === match.home_team_id && (
                               <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
                             )}
-                          </button>
+                          </div>
 
                           {/* Scores */}
                           <div className="flex items-center gap-2">
@@ -336,39 +336,62 @@ export default function BracketPage() {
                             )}
                           </div>
 
-                          {/* Away team */}
-                          <button
-                            onClick={() => !isLocked && !isFinished && updatePred(match.id, 'winnerId', match.away_team_id)}
-                            disabled={isLocked || isFinished}
-                            className={`flex-1 text-center rounded-xl p-2 transition-all ${
-                              pred?.winnerId === match.away_team_id
-                                ? 'bg-green-50 ring-2 ring-green-500'
-                                : isFinished && match.winner_id === match.away_team_id
-                                ? 'bg-green-50 ring-2 ring-green-500'
-                                : 'hover:bg-gray-50'
-                            } ${isLocked || isFinished ? 'cursor-default' : 'cursor-pointer'}`}
-                          >
+                          {/* Away team — só visual, não clicável */}
+                          <div className={`flex-1 text-center rounded-xl p-2 ${
+                            isFinished && match.winner_id === match.away_team_id
+                              ? 'bg-green-50 ring-2 ring-green-500'
+                              : !isFinished && pred?.winnerId === match.away_team_id
+                              ? 'bg-green-50 ring-2 ring-green-400'
+                              : ''
+                          }`}>
                             <div className="text-2xl">{match.away_team?.flag}</div>
                             <div className="text-xs font-semibold text-gray-700 mt-1 leading-tight">{match.away_team?.name}</div>
                             {isFinished && match.winner_id === match.away_team_id && (
                               <div className="text-xs text-green-600 font-bold mt-0.5">✓ Passou</div>
                             )}
-                          </button>
+                          </div>
                         </div>
 
-                        {/* Penalties toggle */}
-                        {!isFinished && !isLocked && (
-                          <div className="mt-3 flex justify-center">
-                            <button
-                              onClick={() => updatePred(match.id, 'penalties', !pred?.penalties)}
-                              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-all ${
-                                pred?.penalties
-                                  ? 'bg-yellow-50 border-yellow-300 text-yellow-700 font-semibold'
-                                  : 'border-gray-200 text-gray-500 hover:border-yellow-300'
-                              }`}
-                            >
-                              🟡 {pred?.penalties ? 'Vai a pênaltis! (+2)' : 'Vai a pênaltis?'}
-                            </button>
+                        {/* Empate: seleção manual de quem passa + pênaltis */}
+                        {!isFinished && !isLocked && isTie && (
+                          <div className="mt-3 border border-yellow-200 bg-yellow-50 rounded-xl p-3">
+                            <p className="text-xs font-semibold text-yellow-700 text-center mb-2">
+                              🤝 Empate — quem vai passar?
+                            </p>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => updatePred(match.id, 'winnerId', match.home_team_id)}
+                                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                                  pred?.winnerId === match.home_team_id
+                                    ? 'bg-green-500 text-white border-green-500'
+                                    : 'bg-white border-gray-200 text-gray-700 hover:border-green-400'
+                                }`}
+                              >
+                                {match.home_team?.flag} {match.home_team?.name}
+                              </button>
+                              <button
+                                onClick={() => updatePred(match.id, 'winnerId', match.away_team_id)}
+                                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                                  pred?.winnerId === match.away_team_id
+                                    ? 'bg-green-500 text-white border-green-500'
+                                    : 'bg-white border-gray-200 text-gray-700 hover:border-green-400'
+                                }`}
+                              >
+                                {match.away_team?.flag} {match.away_team?.name}
+                              </button>
+                            </div>
+                            <div className="mt-2 flex justify-center">
+                              <button
+                                onClick={() => updatePred(match.id, 'penalties', !pred?.penalties)}
+                                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-all ${
+                                  pred?.penalties
+                                    ? 'bg-yellow-400 border-yellow-400 text-white font-semibold'
+                                    : 'border-yellow-300 text-yellow-600 hover:bg-yellow-100'
+                                }`}
+                              >
+                                🟡 {pred?.penalties ? 'Vai a pênaltis! (+2 pts)' : 'Vai a pênaltis?'}
+                              </button>
+                            </div>
                           </div>
                         )}
 
